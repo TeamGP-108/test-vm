@@ -160,10 +160,14 @@ load_vm_config() {
     if [[ -f "$config_file" ]]; then
         # Clear previous variables
         unset VM_NAME OS_TYPE CODENAME IMG_URL HOSTNAME USERNAME PASSWORD
-        unset DISK_SIZE MEMORY CPUS SSH_PORT GUI_MODE PORT_FORWARDS IMG_FILE SEED_FILE CREATED BASE_IMG
+        unset DISK_SIZE MEMORY CPUS SSH_PORT GUI_MODE PORT_FORWARDS IMG_FILE SEED_FILE CREATED BASE_IMG SUDO_NOPASSWD
         
         # Load the configuration
         source "$config_file"
+        
+        # Set default for SUDO_NOPASSWD if not set (backward compatibility)
+        SUDO_NOPASSWD="${SUDO_NOPASSWD:-true}"
+        
         return 0
     else
         print_status "ERROR" "Configuration for VM '$vm_name' not found"
@@ -188,6 +192,7 @@ MEMORY="$MEMORY"
 CPUS="$CPUS"
 SSH_PORT="$SSH_PORT"
 GUI_MODE="$GUI_MODE"
+SUDO_NOPASSWD="${SUDO_NOPASSWD:-true}"
 PORT_FORWARDS="$PORT_FORWARDS"
 IMG_FILE="$IMG_FILE"
 SEED_FILE="$SEED_FILE"
@@ -330,6 +335,23 @@ create_new_vm() {
         fi
     done
 
+    # Sudo configuration
+    while true; do
+        read -p "$(print_status "INPUT" "Require password for sudo? (y/n, default: n): ")" sudo_input
+        SUDO_NOPASSWD=true
+        sudo_input="${sudo_input:-n}"
+        if [[ "$sudo_input" =~ ^[Yy]$ ]]; then 
+            SUDO_NOPASSWD=false
+            print_status "INFO" "Sudo will require password"
+            break
+        elif [[ "$sudo_input" =~ ^[Nn]$ ]]; then
+            print_status "INFO" "Sudo will NOT require password (passwordless)"
+            break
+        else
+            print_status "ERROR" "Please answer y or n"
+        fi
+    done
+
     # Additional network options
     read -p "$(print_status "INPUT" "Additional port forwards (e.g., 8080:80, press Enter for none): ")" PORT_FORWARDS
 
@@ -379,6 +401,13 @@ setup_vm_image() {
 
     # cloud-init configuration
     print_status "INFO" "Creating cloud-init configuration..."
+    
+    # Determine sudo configuration
+    local sudo_rule="ALL=(ALL) NOPASSWD:ALL"
+    if [[ "$SUDO_NOPASSWD" == false ]]; then
+        sudo_rule="ALL=(ALL:ALL) ALL"
+    fi
+    
     cat > user-data <<EOF
 #cloud-config
 hostname: $HOSTNAME
@@ -386,7 +415,7 @@ ssh_pwauth: true
 disable_root: false
 users:
   - name: $USERNAME
-    sudo: ALL=(ALL) NOPASSWD:ALL
+    sudo: $sudo_rule
     shell: /bin/bash
     lock_passwd: false
     passwd: $(openssl passwd -6 "$PASSWORD" 2>/dev/null || echo '$6$rounds=4096$saltsalt$encrypted')
@@ -565,6 +594,7 @@ show_vm_info() {
         echo "║                                                                  ║"
         echo "║   Configuration:                                                 ║"
         echo "║   • GUI Mode:     $GUI_MODE                                       "
+        echo "║   • Sudo Password: $(if [[ "$SUDO_NOPASSWD" == false ]]; then echo "Required"; else echo "Not Required"; fi)       "
         echo "║   • Port Forwards: ${PORT_FORWARDS:-None}                        "
         echo "║                                                                  ║"
         echo "╚══════════════════════════════════════════════════════════════════╝"
@@ -616,10 +646,11 @@ edit_vm_config() {
             echo "  3) Password (Current: ******)"
             echo "  4) SSH Port (Current: $SSH_PORT)"
             echo "  5) GUI Mode (Current: $GUI_MODE)"
-            echo "  6) Port Forwards (Current: ${PORT_FORWARDS:-None})"
-            echo "  7) Memory (RAM) (Current: $MEMORY MB)"
-            echo "  8) CPU Count (Current: $CPUS)"
-            echo "  9) Disk Size (Current: $DISK_SIZE)"
+            echo "  6) Sudo Password (Current: $(if [[ "$SUDO_NOPASSWD" == false ]]; then echo "Required"; else echo "Not Required"; fi))"
+            echo "  7) Port Forwards (Current: ${PORT_FORWARDS:-None})"
+            echo "  8) Memory (RAM) (Current: $MEMORY MB)"
+            echo "  9) CPU Count (Current: $CPUS)"
+            echo "  10) Disk Size (Current: $DISK_SIZE)"
             echo "  0) Back to main menu"
             echo ""
             
@@ -686,10 +717,26 @@ edit_vm_config() {
                     done
                     ;;
                 6)
+                    while true; do
+                        read -p "$(print_status "INPUT" "Require password for sudo? (y/n, current: $(if [[ "$SUDO_NOPASSWD" == false ]]; then echo "Required"; else echo "Not Required"; fi)): ")" sudo_input
+                        if [[ "$sudo_input" =~ ^[Yy]$ ]]; then 
+                            SUDO_NOPASSWD=false
+                            break
+                        elif [[ "$sudo_input" =~ ^[Nn]$ ]]; then
+                            SUDO_NOPASSWD=true
+                            break
+                        elif [ -z "$sudo_input" ]; then
+                            break
+                        else
+                            print_status "ERROR" "Please answer y or n"
+                        fi
+                    done
+                    ;;
+                7)
                     read -p "$(print_status "INPUT" "Additional port forwards (current: ${PORT_FORWARDS:-None}): ")" new_port_forwards
                     PORT_FORWARDS="${new_port_forwards:-$PORT_FORWARDS}"
                     ;;
-                7)
+                8)
                     while true; do
                         read -p "$(print_status "INPUT" "Enter new memory in MB (current: $MEMORY): ")" new_memory
                         new_memory="${new_memory:-$MEMORY}"
@@ -733,8 +780,8 @@ edit_vm_config() {
                     ;;
             esac
             
-            # Recreate seed image with new configuration if user/password/hostname changed
-            if [[ "$edit_choice" -eq 1 || "$edit_choice" -eq 2 || "$edit_choice" -eq 3 ]]; then
+            # Recreate seed image with new configuration if user/password/hostname/sudo changed
+            if [[ "$edit_choice" -eq 1 || "$edit_choice" -eq 2 || "$edit_choice" -eq 3 || "$edit_choice" -eq 6 ]]; then
                 print_status "INFO" "Updating cloud-init configuration..."
                 setup_vm_image
             fi
