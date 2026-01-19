@@ -86,6 +86,22 @@ validate_input() {
     return 0
 }
 
+# Function to check KVM availability
+check_kvm() {
+    if [ -e /dev/kvm ]; then
+        if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            return 0
+        else
+            print_status "WARN" "KVM device exists but no permission. You may need to:"
+            echo "    sudo usermod -aG kvm $USER"
+            echo "    Then logout and login again"
+            return 1
+        fi
+    else
+        return 1
+    fi
+}
+
 # Function to check dependencies
 check_dependencies() {
     local deps=("qemu-system-x86_64" "wget" "cloud-localds" "qemu-img")
@@ -109,6 +125,20 @@ check_dependencies() {
     fi
     
     print_status "SUCCESS" "All dependencies are installed"
+    
+    # Check KVM availability
+    echo ""
+    if check_kvm; then
+        print_status "SUCCESS" "KVM acceleration available - VMs will run fast"
+        KVM_AVAILABLE=true
+    else
+        print_status "WARN" "KVM not available - VMs will use software emulation (slower)"
+        print_status "INFO" "To enable KVM:"
+        echo "    1. Enable virtualization in BIOS (VT-x for Intel, AMD-V for AMD)"
+        echo "    2. Load KVM module: sudo modprobe kvm && sudo modprobe kvm_intel (or kvm_amd)"
+        echo "    3. Add user to kvm group: sudo usermod -aG kvm $USER"
+        KVM_AVAILABLE=false
+    fi
 }
 
 # Function to cleanup temporary files
@@ -427,16 +457,23 @@ start_vm() {
         # Base QEMU command
         local qemu_cmd=(
             qemu-system-x86_64
-            -enable-kvm
             -m "$MEMORY"
             -smp "$CPUS"
-            -cpu host
             -drive "file=$IMG_FILE,format=qcow2,if=virtio,cache=writeback"
             -drive "file=$SEED_FILE,format=raw,if=virtio,readonly=on"
             -boot order=c
             -device virtio-net-pci,netdev=n0
             -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22"
         )
+        
+        # Add KVM acceleration if available
+        if [[ "$KVM_AVAILABLE" == true ]]; then
+            qemu_cmd+=(-enable-kvm -cpu host)
+            print_status "SUCCESS" "Using KVM acceleration"
+        else
+            qemu_cmd+=(-cpu qemu64)
+            print_status "WARN" "Using software emulation (slow) - KVM not available"
+        fi
 
         # Add port forwards if specified
         if [[ -n "$PORT_FORWARDS" ]]; then
@@ -936,6 +973,9 @@ trap cleanup EXIT
 # Initialize paths
 VM_DIR="${VM_DIR:-$HOME/vms}"
 mkdir -p "$VM_DIR"
+
+# Global variable for KVM availability
+KVM_AVAILABLE=false
 
 # Supported OS list
 declare -A OS_OPTIONS=(
